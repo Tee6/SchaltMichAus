@@ -21,9 +21,17 @@ Whenever someone in the flat listened to music in the evening, we often forgot t
   - Analyzes the audio-out signal to detect real audio activity.
   - Marks the system as “inactive” after a configurable silence timeout.
 
+![Trigger Voltage measurement](images/image.png)
+
+Simple Voltage Divider $U_m=12V*{10k\Omega \above{2pt} 10k\Omega+47k\Omega} \approx 2.1V$
+
 - **Automatic power-down**
   - Powers down connected devices via a load switch.
   - Sends IR commands to the receiver to perform a clean shutdown, just like a remote.
+
+![LoadSwitches](images/image1.png)
+
+Load Switches parallel so the current is less of a problem. We only need Power so D- and D+ are left floating.
 
 - **Non-intrusive integration**
   - Installed between the receiver’s audio/trigger outputs and the peripherals.
@@ -33,6 +41,10 @@ Whenever someone in the flat listened to music in the evening, we often forgot t
 - **Smart audio detection**
   - Uses a DC-biased input and statistical deviation (“loudness over time”) to detect meaningful audio.
   - Avoids false shutdowns during quiet passages or short pauses.
+
+![audio-measurement](images/image2.png)
+
+Audio Signal is biased to $3.3V / 2 =1.65V$ because IO Pin cant handle negative Voltage
 
 ## Typical Use Case
 
