@@ -8,14 +8,14 @@
 #include <PubSubClient.h>
 
 // ---------------- WLAN ----------------
-const char* ssid     = "";
+const char* ssid = "";
 const char* password = "";
 
 // ---------------- MQTT ----------------
-const char* mqttBroker   = "192.168.XX.XX";
+const char* mqttBroker   = "192.168.178.113"; // ggf. ändern
 const int   mqttPort     = 1883;
-const char* mqttUser     = "";
-const char* mqttPassword = "";
+const char* mqttUser     = "esp32";
+const char* mqttPassword = "esp32";
 
 #define MQTT_PREFIX        "homeassistant"
 #define DEVICE_ID          "esp32_audiocontrol"
@@ -32,6 +32,12 @@ const char* mqttPassword = "";
 #define TOPIC_DISC_MUSIC    MQTT_PREFIX "/binary_sensor/" DEVICE_ID "_music/config"
 #define TOPIC_DISC_IR       MQTT_PREFIX "/button/"        DEVICE_ID "_ir_send/config"
 #define TOPIC_DISC_IR_EVENT MQTT_PREFIX "/sensor/"        DEVICE_ID "_ir_event/config"
+
+// NEU: Discovery-Topics für die vier zusätzlichen Buttons
+#define TOPIC_DISC_VOL_UP   MQTT_PREFIX "/button/" DEVICE_ID "_vol_up/config"
+#define TOPIC_DISC_VOL_DOWN MQTT_PREFIX "/button/" DEVICE_ID "_vol_down/config"
+#define TOPIC_DISC_PHONO    MQTT_PREFIX "/button/" DEVICE_ID "_in_phono/config"
+#define TOPIC_DISC_AUDIO1   MQTT_PREFIX "/button/" DEVICE_ID "_in_audio1/config"
 
 // ---------------- Pins ----------------
 #define PIN_TRIGGER 32
@@ -53,8 +59,12 @@ const unsigned long TRIGGER_GRACE_MS = 30000UL;  // 30 Sekunden
 // Schutzfenster nach MQTT-Connect: retained Messages in diesem Fenster ignorieren
 const unsigned long MQTT_RETAINED_IGNORE_MS = 2000UL;
 
-// Debounce für manuelle IR-Presses: verhindert Doppel-Toggle egal welche Ursache
+// Debounce für manuellen POWER-Press: verhindert Doppel-Toggle egal welche Ursache
 const unsigned long MANUAL_IR_DEBOUNCE_MS = 3000UL;
+
+// Kurzer Debounce für Vol/Input: nur gegen MQTT-Doppelzustellung,
+// darf schnelles wiederholtes Drücken (Lautstärke!) NICHT blockieren
+const unsigned long SHORT_IR_DEBOUNCE_MS = 250UL;
 
 // ---------------- Timing ----------------
 const unsigned long MUSIC_CHECK_MS        = 3000UL;
@@ -64,7 +74,12 @@ const unsigned long MQTT_RECONNECT_MS     = 10000UL;
 const unsigned long WIFI_RECONNECT_MS     = 15000UL;
 const unsigned long DISCOVERY_INTERVAL_MS = 300000UL;
 
-#define YAMAHA_KEY_POWER 0x7E8154AB
+// ---------------- Yamaha IR Codes (aus LIRC RAV294 / RX-V1065) ----------------
+#define YAMAHA_KEY_POWER   0x7E8154AB
+#define YAMAHA_VOL_UP      0x5EA158A7   // KEY_VOLUMEUP
+#define YAMAHA_VOL_DOWN    0x5EA1D827   // KEY_VOLUMEDOWN
+#define YAMAHA_IN_PHONO    0x5EA128D7   // INPUT_PHONO
+#define YAMAHA_IN_AUDIO1   0x5EA1A658   // INPUT_AUDIO1
 
 // ---------------- Globals ----------------
 WiFiClient   wifiClient;
@@ -92,11 +107,13 @@ unsigned long g_lastMusicTime     = 0;
 unsigned long g_triggerHighTime   = 0;
 unsigned long g_mqttConnectedAt   = 0;
 unsigned long g_lastManualIrTime  = 0;
+unsigned long g_lastShortIrTime   = 0;
 
 // ================================================================
 // Forward Declarations
 // ================================================================
 void sendIR(const char* reason);
+void sendIRCode(uint32_t code, const char* reason);
 void publishSwitchState(bool on);
 void publishTriggerState(bool on);
 void publishMusicState(bool on);
@@ -177,6 +194,48 @@ void publishDiscovery() {
       "}"
     "}", true);
 
+  // NEU: Vier weitere Buttons. Gleiches command_topic, unterschiedliche payload_press.
+  // Vorteil: nur eine Subscription, Retained-Handling & Startup-Schutz gelten automatisch.
+  mqtt.publish(TOPIC_DISC_VOL_UP,
+    "{"
+      "\"name\":\"Lautstärke +\","
+      "\"unique_id\":\"" DEVICE_ID "_vol_up\","
+      "\"command_topic\":\"" TOPIC_IR_CMD "\","
+      "\"payload_press\":\"VOL_UP\","
+      "\"icon\":\"mdi:volume-plus\","
+      "\"device\":{\"identifiers\":[\"" DEVICE_ID "\"],\"name\":\"ESP32 Audio Controller\"}"
+    "}", true);
+
+  mqtt.publish(TOPIC_DISC_VOL_DOWN,
+    "{"
+      "\"name\":\"Lautstärke -\","
+      "\"unique_id\":\"" DEVICE_ID "_vol_down\","
+      "\"command_topic\":\"" TOPIC_IR_CMD "\","
+      "\"payload_press\":\"VOL_DOWN\","
+      "\"icon\":\"mdi:volume-minus\","
+      "\"device\":{\"identifiers\":[\"" DEVICE_ID "\"],\"name\":\"ESP32 Audio Controller\"}"
+    "}", true);
+
+  mqtt.publish(TOPIC_DISC_PHONO,
+    "{"
+      "\"name\":\"Input Phono\","
+      "\"unique_id\":\"" DEVICE_ID "_in_phono\","
+      "\"command_topic\":\"" TOPIC_IR_CMD "\","
+      "\"payload_press\":\"PHONO\","
+      "\"icon\":\"mdi:album\","
+      "\"device\":{\"identifiers\":[\"" DEVICE_ID "\"],\"name\":\"ESP32 Audio Controller\"}"
+    "}", true);
+
+  mqtt.publish(TOPIC_DISC_AUDIO1,
+    "{"
+      "\"name\":\"Input Audio1\","
+      "\"unique_id\":\"" DEVICE_ID "_in_audio1\","
+      "\"command_topic\":\"" TOPIC_IR_CMD "\","
+      "\"payload_press\":\"AUDIO1\","
+      "\"icon\":\"mdi:audio-input-rca\","
+      "\"device\":{\"identifiers\":[\"" DEVICE_ID "\"],\"name\":\"ESP32 Audio Controller\"}"
+    "}", true);
+
   mqtt.publish(TOPIC_DISC_IR_EVENT,
     "{"
       "\"name\":\"IR Letzter Grund\","
@@ -225,26 +284,50 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // Das erzeugte eine Self-Feedback-Loop: publish("") -> eigener Empfang
     // -> erneutes publish("") -> ... im Millisekundentakt.
     if (length > 0) {
-      mqtt.publish(TOPIC_IR_CMD, "", true);  // Retained PRESS löschen
+      mqtt.publish(TOPIC_IR_CMD, "", true);  // Retained Press löschen
+    } else {
+      return;  // leere Clear-Nachricht: nichts weiter tun
     }
 
-    if (strcmp(msg, "PRESS") == 0) {
-      // Schutzfenster: PRESS kurz nach Connect = retained, ignorieren
-      if (millis() - g_mqttConnectedAt < MQTT_RETAINED_IGNORE_MS) {
-        Serial.println("MQTT IR PRESS ignoriert: retained (Startup)");
-        return;
-      }
+    unsigned long now = millis();
 
-      // Debounce gegen Doppel-Press (egal welche Ursache)
-      unsigned long now = millis();
+    // Schutzfenster: Press kurz nach Connect = retained, ignorieren.
+    // Gilt für ALLE Button-Payloads (POWER, VOL, INPUT).
+    if (millis() - g_mqttConnectedAt < MQTT_RETAINED_IGNORE_MS) {
+      Serial.println("MQTT Press ignoriert: retained (Startup)");
+      return;
+    }
+
+    // ---- POWER (langer Debounce, Doppel-Toggle wäre fatal) ----
+    if (strcmp(msg, "PRESS") == 0) {
       if (now - g_lastManualIrTime < MANUAL_IR_DEBOUNCE_MS) {
         Serial.println("MQTT IR PRESS ignoriert: Debounce (zu kurz nach letztem Press)");
         return;
       }
       g_lastManualIrTime = now;
-
-      Serial.println("HA Button: IR manuell");
+      Serial.println("HA Button: IR manuell (POWER)");
       sendIR("manual_ha");
+      return;
+    }
+
+    // ---- Vol/Input (kurzer Debounce: schnelles Drücken erlaubt) ----
+    if (now - g_lastShortIrTime < SHORT_IR_DEBOUNCE_MS) {
+      Serial.println("MQTT Press ignoriert: Kurz-Debounce");
+      return;
+    }
+
+    if (strcmp(msg, "VOL_UP") == 0) {
+      g_lastShortIrTime = now;
+      sendIRCode(YAMAHA_VOL_UP, "vol_up");
+    } else if (strcmp(msg, "VOL_DOWN") == 0) {
+      g_lastShortIrTime = now;
+      sendIRCode(YAMAHA_VOL_DOWN, "vol_down");
+    } else if (strcmp(msg, "PHONO") == 0) {
+      g_lastShortIrTime = now;
+      sendIRCode(YAMAHA_IN_PHONO, "input_phono");
+    } else if (strcmp(msg, "AUDIO1") == 0) {
+      g_lastShortIrTime = now;
+      sendIRCode(YAMAHA_IN_AUDIO1, "input_audio1");
     }
   }
 }
@@ -293,12 +376,17 @@ void publishIrEvent(const char* reason) {
 }
 
 // ================================================================
-// IR – mit Grund-Parameter
+// IR – generisch mit Code + Grund
 // ================================================================
-void sendIR(const char* reason) {
-  Serial.printf("IR: Yamaha POWER | Grund: %s\n", reason);
-  irsend.sendNEC(YAMAHA_KEY_POWER, 32);
+void sendIRCode(uint32_t code, const char* reason) {
+  Serial.printf("IR: 0x%08X | Grund: %s\n", code, reason);
+  irsend.sendNEC(code, 32);
   publishIrEvent(reason);
+}
+
+// POWER bleibt als eigene Funktion (wird auch vom Silence-Timeout genutzt)
+void sendIR(const char* reason) {
+  sendIRCode(YAMAHA_KEY_POWER, reason);
 }
 
 // ================================================================
