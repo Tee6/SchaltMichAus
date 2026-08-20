@@ -28,6 +28,13 @@ Whenever someone in the flat listened to music in the evening, we often forgot t
   - Analyzes the audio-out signal to detect real audio activity.
   - Marks the system as "inactive" after a configurable silence timeout.
 
+- **Input Switching and Volume Control**
+  - Can switch between Inputs for Record Player (Phono) and TV (Audio1).
+  - With Home Assistant Automations, the Input gets automatically set for the TV and in the Future maybe even for the record player with an DIY sensor when i open the record player.
+  - Volume can be controlled with Home Assistant.
+![Home Assistant Dashboard](images/HA_screenshot.png)
+
+
 ![Trigger Voltage measurement](images/image.png)
 
 Simple Voltage Divider
