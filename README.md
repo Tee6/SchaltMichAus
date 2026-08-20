@@ -32,7 +32,7 @@ Whenever someone in the flat listened to music in the evening, we often forgot t
   - Can switch between Inputs for Record Player (Phono) and TV (Audio1).
   - With Home Assistant Automations, the Input gets automatically set for the TV and in the Future maybe even for the record player with an DIY sensor when i open the record player.
   - Volume can be controlled with Home Assistant.
-![Home Assistant Dashboard](images/HA_screenshot.png)
+![Home Assistant Dashboard](images/HA_screenshot.PNG)
 
 
 ![Trigger Voltage measurement](images/image.png)
